@@ -1,118 +1,57 @@
-name: Build macOS (.app + .dmg) with auto FFmpeg (stable)
+name: Build VideoCutter (macOS DMG + Windows EXE)
 
 on:
   push:
     branches: [ "main" ]
   workflow_dispatch:
 
+env:
+  APP_NAME: VideoCutter
+  ENTRY_SCRIPT: app.py        # <<< ĐỔI THÀNH file Python khởi chạy của bạn (vd: video_cutter_gui.py)
+
 jobs:
+  # ---------------- macOS Apple Silicon (arm64) ----------------
   mac-arm64:
-    name: macOS Apple Silicon (arm64)
     runs-on: macos-14
-    env:
-      APP_NAME: "VideoCutter"  # đặt tên app ở đây
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # In ra danh sách .py (không dùng -maxdepth để tránh lỗi BSD find)
-      - name: Show repo tree (debug)
-        shell: bash
+      - name: Verify entry script exists
         run: |
-          echo "== ROOT =="
-          ls -la
-          echo "== PY FILES FOUND (first 300) =="
-          find . -type f -name "*.py" | sort | sed -n '1,300p'
-
-      # Dò ENTRY_SCRIPT bằng Python (ưu tiên ENTRY_SCRIPT.txt)
-      - name: Detect ENTRY_SCRIPT (Python)
-        id: detect
-        shell: bash
-        run: |
-          ENTRY=$(python - <<'PY'
-import os, re, sys
-# 1) Ưu tiên ENTRY_SCRIPT.txt
-if os.path.isfile('ENTRY_SCRIPT.txt'):
-    p=open('ENTRY_SCRIPT.txt','r',encoding='utf-8').read().strip()
-    if os.path.isfile(p):
-        print(p); sys.exit(0)
-    else:
-        print(f'__ERR__ ENTRY_SCRIPT.txt trỏ tới file không tồn tại: {p}')
-        sys.exit(2)
-
-# 2) Quét tất cả .py (giới hạn 6 cấp theo logic)
-cands=[]
-for root,dirs,files in os.walk('.', topdown=True):
-    depth=root.count(os.sep)-1
-    if depth>=6: continue
-    for f in files:
-        if f.endswith('.py'): cands.append(os.path.join(root,f))
-if not cands:
-    print('__ERR__ Không thấy file .py'); sys.exit(1)
-
-# 3) Heuristic: có PySide6/QApplication và __main__
-pref=None
-for p in cands:
-    try:
-        t=open(p,'r',encoding='utf-8',errors='ignore').read()
-    except Exception:
-        continue
-    if (('PySide6' in t or 'QApplication' in t) and '__main__' in t):
-        pref=p; break
-
-# 4) fallback theo tên quen thuộc
-if pref is None:
-    for tryname in ['app.py','video_cutter_gui.py','src/app.py','src/video_cutter_gui.py']:
-        if os.path.isfile(tryname):
-            pref=tryname; break
-
-# 5) fallback cuối: lấy file .py đầu tiên
-if pref is None:
-    pref=cands[0]
-
-print(pref)
-PY
-)
-          echo "ENTRY raw: $ENTRY"
-          if [[ "$ENTRY" == __ERR__* ]]; then
-            echo "::error::$ENTRY"; exit 1
+          echo "ENTRY_SCRIPT=$ENTRY_SCRIPT"
+          if [ ! -f "$ENTRY_SCRIPT" ]; then
+            echo "::error::ENTRY_SCRIPT not found at $ENTRY_SCRIPT"; exit 1
           fi
-          echo "ENTRY_SCRIPT=$ENTRY" >> "$GITHUB_ENV"
-          echo "Using ENTRY_SCRIPT=$ENTRY"
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-      - name: Setup Node (download ffmpeg/ffprobe static)
+      - name: Setup Node (to fetch ffmpeg/ffprobe)
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Install Python deps
-        shell: bash
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller PySide6 || true
+          pip install pyinstaller PySide6
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Fetch FFmpeg + FFprobe static (darwin/arm64)
-        shell: bash
+      - name: Fetch ffmpeg + ffprobe static (darwin/arm64)
         run: |
           npm i --silent ffmpeg-static@latest ffprobe-static@latest
-          FFMPEG_PATH=$(node -e "process.stdout.write(require('ffmpeg-static')||'')")
-          FFPROBE_PATH=$(node -e "process.stdout.write((require('ffprobe-static').path)||'')")
-          echo "FFMPEG=$FFMPEG_PATH"; echo "FFPROBE=$FFPROBE_PATH"
-          if [ ! -f "$FFMPEG_PATH" ] || [ ! -f "$FFPROBE_PATH" ]; then
-            echo "::error::Không tìm thấy nhị phân ffmpeg/ffprobe"; exit 1
-          fi
-          chmod +x "$FFMPEG_PATH" "$FFPROBE_PATH"
-          echo "FFMPEG_PATH=$FFMPEG_PATH"   >> "$GITHUB_ENV"
-          echo "FFPROBE_PATH=$FFPROBE_PATH" >> "$GITHUB_ENV"
+          echo "FFMPEG_PATH=$(node -p "require('ffmpeg-static')")" >> $GITHUB_ENV
+          echo "FFPROBE_PATH=$(node -p "require('ffprobe-static').path")" >> $GITHUB_ENV
 
-      - name: Build .app (embed FFmpeg/FFprobe)
-        shell: bash
+      - name: Make tools executable
+        run: |
+          chmod +x "$FFMPEG_PATH" "$FFPROBE_PATH"
+
+      - name: Build .app with PyInstaller (embed ffmpeg/ffprobe)
         run: |
           pyinstaller --noconfirm --clean --windowed \
             --name "$APP_NAME" \
@@ -122,23 +61,143 @@ PY
           ls -la dist
 
       - name: Create .dmg
-        shell: bash
         run: |
           DMG_NAME="${APP_NAME}-arm64.dmg"
           mkdir -p dist_dmg
           cp -R "dist/${APP_NAME}.app" dist_dmg/
           hdiutil create "$DMG_NAME" -volname "$APP_NAME" -srcfolder "dist_dmg" -ov -format UDZO
-          rm -rf dist_dmg
-          ls -la
 
-      - name: Upload .app
+      - name: Upload macOS arm64 .dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-mac-dmg-arm64
+          path: ${{ env.APP_NAME }}-arm64.dmg
+
+      - name: Upload macOS arm64 .app (optional)
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.APP_NAME }}-mac-app-arm64
           path: dist/${{ env.APP_NAME }}.app
 
-      - name: Upload .dmg
+  # ---------------- macOS Intel (x86_64) — tùy chọn, bật khi cần ----------------
+  mac-x86_64:
+    if: ${{ false }}   # đổi thành true để bật job này
+    runs-on: macos-13
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify entry script exists
+        run: |
+          echo "ENTRY_SCRIPT=$ENTRY_SCRIPT"
+          if [ ! -f "$ENTRY_SCRIPT" ]; then
+            echo "::error::ENTRY_SCRIPT not found at $ENTRY_SCRIPT"; exit 1
+          fi
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Setup Node (to fetch ffmpeg/ffprobe)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller PySide6
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Fetch ffmpeg + ffprobe static (darwin/x64)
+        run: |
+          npm i --silent ffmpeg-static@latest ffprobe-static@latest
+          echo "FFMPEG_PATH=$(node -p "require('ffmpeg-static')")" >> $GITHUB_ENV
+          echo "FFPROBE_PATH=$(node -p "require('ffprobe-static').path")" >> $GITHUB_ENV
+
+      - name: Make tools executable
+        run: |
+          chmod +x "$FFMPEG_PATH" "$FFPROBE_PATH"
+
+      - name: Build .app with PyInstaller (embed ffmpeg/ffprobe)
+        run: |
+          pyinstaller --noconfirm --clean --windowed \
+            --name "$APP_NAME" \
+            --add-binary "$FFMPEG_PATH:." \
+            --add-binary "$FFPROBE_PATH:." \
+            "$ENTRY_SCRIPT"
+          ls -la dist
+
+      - name: Create .dmg
+        run: |
+          DMG_NAME="${APP_NAME}-x86_64.dmg"
+          mkdir -p dist_dmg
+          cp -R "dist/${APP_NAME}.app" dist_dmg/
+          hdiutil create "$DMG_NAME" -volname "$APP_NAME" -srcfolder "dist_dmg" -ov -format UDZO
+
+      - name: Upload macOS x86_64 .dmg
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.APP_NAME }}-mac-dmg-arm64
-          path: ${{ env.APP_NAME }}-arm64.dmg
+          name: ${{ env.APP_NAME }}-mac-dmg-x86_64
+          path: ${{ env.APP_NAME }}-x86_64.dmg
+
+  # ---------------- Windows EXE — tùy chọn, bật khi cần ----------------
+  win:
+    if: ${{ false }}   # đổi thành true để bật job này
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify entry script exists
+        shell: pwsh
+        run: |
+          Write-Host "ENTRY_SCRIPT=$env:ENTRY_SCRIPT"
+          if (-not (Test-Path $env:ENTRY_SCRIPT)) {
+            Write-Error "ENTRY_SCRIPT not found at $env:ENTRY_SCRIPT"; exit 1
+          }
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Setup Node (to fetch ffmpeg/ffprobe)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller PySide6
+          if (Test-Path requirements.txt) { pip install -r requirements.txt }
+
+      - name: Fetch ffmpeg + ffprobe static (win)
+        shell: pwsh
+        run: |
+          npm i --silent ffmpeg-static@latest ffprobe-static@latest
+          $ffmpeg = node -p "require('ffmpeg-static')"
+          $ffprobe = node -p "require('ffprobe-static').path"
+          "FFMPEG_PATH=$ffmpeg"  | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "FFPROBE_PATH=$ffprobe"| Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build EXE with PyInstaller (embed ffmpeg/ffprobe)
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile --noconsole `
+            --name "$env:APP_NAME" `
+            --add-binary "$env:FFMPEG_PATH;." `
+            --add-binary "$env:FFPROBE_PATH;." `
+            "$env:ENTRY_SCRIPT"
+          Get-ChildItem dist
+
+      - name: Upload Windows EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-win-exe
+          path: dist/${{ env.APP_NAME }}.exe
