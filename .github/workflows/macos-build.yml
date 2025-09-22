@@ -1,4 +1,4 @@
-name: Build macOS (.app + .dmg) with auto FFmpeg (portable entry detect)
+name: Build macOS (.app + .dmg) with auto FFmpeg (stable)
 
 on:
   push:
@@ -10,83 +10,72 @@ jobs:
     name: macOS Apple Silicon (arm64)
     runs-on: macos-14
     env:
-      APP_NAME: "VideoCutter"   # đặt tên app ở đây
+      APP_NAME: "VideoCutter"  # đặt tên app ở đây
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # In ra danh sách .py (không dùng -maxdepth để tránh lỗi BSD find)
       - name: Show repo tree (debug)
         shell: bash
         run: |
           echo "== ROOT =="
           ls -la
-          echo "== PY FILES FOUND (<=6 levels) =="
-          find . -type f -name "*.py" -maxdepth 6 -print | sort
+          echo "== PY FILES FOUND (first 300) =="
+          find . -type f -name "*.py" | sort | sed -n '1,300p'
 
-      # ⬇️ Không dùng bash mapfile nữa — dùng Python để tìm ENTRY_SCRIPT
-      - name: Detect ENTRY_SCRIPT (Python - portable)
+      # Dò ENTRY_SCRIPT bằng Python (ưu tiên ENTRY_SCRIPT.txt)
+      - name: Detect ENTRY_SCRIPT (Python)
         id: detect
         shell: bash
         run: |
           ENTRY=$(python - <<'PY'
 import os, re, sys
-# 1) Cho phép override bằng ENTRY_SCRIPT.txt (ghi "app.py" hoặc "subdir/app.py")
+# 1) Ưu tiên ENTRY_SCRIPT.txt
 if os.path.isfile('ENTRY_SCRIPT.txt'):
-    p = open('ENTRY_SCRIPT.txt','r',encoding='utf-8').read().strip()
+    p=open('ENTRY_SCRIPT.txt','r',encoding='utf-8').read().strip()
     if os.path.isfile(p):
         print(p); sys.exit(0)
     else:
-        print(f'__ERR__ ENTRY_SCRIPT.txt -> missing: {p}')
+        print(f'__ERR__ ENTRY_SCRIPT.txt trỏ tới file không tồn tại: {p}')
         sys.exit(2)
 
-# 2) Quét tất cả .py (tối đa 6 cấp)
-cands = []
-for root, dirs, files in os.walk('.', topdown=True):
-    # giới hạn độ sâu tương đối
-    depth = root.count(os.sep) - 1  # '.' = -1
-    if depth >= 6:
-        continue
+# 2) Quét tất cả .py (giới hạn 6 cấp theo logic)
+cands=[]
+for root,dirs,files in os.walk('.', topdown=True):
+    depth=root.count(os.sep)-1
+    if depth>=6: continue
     for f in files:
-        if f.endswith('.py'):
-            cands.append(os.path.join(root, f))
-
+        if f.endswith('.py'): cands.append(os.path.join(root,f))
 if not cands:
-    print('__ERR__ no .py files found')
-    sys.exit(1)
+    print('__ERR__ Không thấy file .py'); sys.exit(1)
 
-# 3) Heuristic: file có PySide6/QApplication và __main__
-pref = None
+# 3) Heuristic: có PySide6/QApplication và __main__
+pref=None
 for p in cands:
     try:
-        t = open(p,'r',encoding='utf-8',errors='ignore').read()
+        t=open(p,'r',encoding='utf-8',errors='ignore').read()
     except Exception:
         continue
-    if re.search(r'(from\\s+PySide6|import\\s+PySide6|QApplication)', t, re.I) and '__main__' in t:
-        pref = p
-        break
+    if (('PySide6' in t or 'QApplication' in t) and '__main__' in t):
+        pref=p; break
 
-# 4) Fallback theo tên thường gặp
+# 4) fallback theo tên quen thuộc
 if pref is None:
     for tryname in ['app.py','video_cutter_gui.py','src/app.py','src/video_cutter_gui.py']:
         if os.path.isfile(tryname):
-            pref = tryname
-            break
+            pref=tryname; break
 
-# 5) Fallback cuối: lấy file .py đầu tiên
+# 5) fallback cuối: lấy file .py đầu tiên
 if pref is None:
-    pref = cands[0]
-
-if not pref or not os.path.isfile(pref):
-    print('__ERR__ no entry script')
-    sys.exit(1)
+    pref=cands[0]
 
 print(pref)
 PY
 )
           echo "ENTRY raw: $ENTRY"
           if [[ "$ENTRY" == __ERR__* ]]; then
-            echo "::error::$ENTRY"
-            exit 1
+            echo "::error::$ENTRY"; exit 1
           fi
           echo "ENTRY_SCRIPT=$ENTRY" >> "$GITHUB_ENV"
           echo "Using ENTRY_SCRIPT=$ENTRY"
@@ -96,7 +85,7 @@ PY
         with:
           python-version: "3.10"
 
-      - name: Setup Node (để tải ffmpeg/ffprobe static)
+      - name: Setup Node (download ffmpeg/ffprobe static)
         uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -111,11 +100,10 @@ PY
       - name: Fetch FFmpeg + FFprobe static (darwin/arm64)
         shell: bash
         run: |
-          npm i ffmpeg-static@latest ffprobe-static@latest
-          FFMPEG_PATH=$(node -p "require('ffmpeg-static') || ''")
-          FFPROBE_PATH=$(node -p "require('ffprobe-static').path || ''")
-          echo "FFMPEG=$FFMPEG_PATH"
-          echo "FFPROBE=$FFPROBE_PATH"
+          npm i --silent ffmpeg-static@latest ffprobe-static@latest
+          FFMPEG_PATH=$(node -e "process.stdout.write(require('ffmpeg-static')||'')")
+          FFPROBE_PATH=$(node -e "process.stdout.write((require('ffprobe-static').path)||'')")
+          echo "FFMPEG=$FFMPEG_PATH"; echo "FFPROBE=$FFPROBE_PATH"
           if [ ! -f "$FFMPEG_PATH" ] || [ ! -f "$FFPROBE_PATH" ]; then
             echo "::error::Không tìm thấy nhị phân ffmpeg/ffprobe"; exit 1
           fi
