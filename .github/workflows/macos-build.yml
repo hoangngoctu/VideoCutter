@@ -7,42 +7,80 @@ on:
 
 jobs:
   mac-arm64:
-    runs-on: macos-14   # Apple Silicon
+    runs-on: macos-14   # Apple Silicon runner (arm64)
     env:
       APP_NAME: "VideoCutter"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Hiển thị cấu trúc repo để bạn nhìn thấy file nằm ở đâu
       - name: Show repo tree (debug)
+        shell: bash
         run: |
           echo "== ROOT =="
           ls -la
-          echo "== FIRST 3 LEVELS =="
-          find . -maxdepth 3 -type f | sed -n '1,200p'
+          echo "== PY FILES FOUND =="
+          find . -type f -name "*.py" -maxdepth 6 -print | sort
 
+      # Tự phát hiện ENTRY_SCRIPT, nhưng nếu có ENTRY_SCRIPT.txt thì ưu tiên dùng
       - name: Detect ENTRY_SCRIPT
         id: detect
         shell: bash
         run: |
-          CANDS=("video_cutter_gui.py" "app.py" "src/video_cutter_gui.py" "src/app.py")
-          FOUND=""
-          for f in "${CANDS[@]}"; do
-            if [ -f "$f" ]; then FOUND="$f"; break; fi
+          # 1) Nếu bạn đặt file chỉ đường dẫn, ví dụ chứa: app.py  hoặc src/app.py
+          if [ -f ENTRY_SCRIPT.txt ]; then
+            ENTRY=$(tr -d '\r' < ENTRY_SCRIPT.txt)
+            if [ -f "$ENTRY" ]; then
+              echo "ENTRY_SCRIPT=$ENTRY" >> $GITHUB_ENV
+              echo ">> Dùng ENTRY_SCRIPT từ ENTRY_SCRIPT.txt: $ENTRY"
+              exit 0
+            else
+              echo "::error::ENTRY_SCRIPT.txt trỏ tới file không tồn tại: $ENTRY"
+              exit 1
+            fi
+          fi
+
+          # 2) Heuristic: ưu tiên file có PySide6/QApplication & __main__
+          mapfile -t PYFILES < <(find . -type f -name "*.py" -maxdepth 6 | sort)
+          if [ ${#PYFILES[@]} -eq 0 ]; then
+            echo "::error::Không tìm thấy file .py nào trong repo."; exit 1
+          fi
+
+          CAND=""
+          for f in "${PYFILES[@]}"; do
+            if grep -qiE "from[[:space:]]+PySide6|import[[:space:]]+PySide6|QApplication" "$f" 2>/dev/null \
+               && grep -q "__main__" "$f" 2>/dev/null; then
+              CAND="$f"; break
+            fi
           done
-          if [ -z "$FOUND" ]; then
-            echo "::error::Không tìm thấy file khởi chạy (ENTRY_SCRIPT). Hãy đổi tên/đường dẫn trong workflow."
+
+          # 3) Fallback: các tên thường gặp
+          if [ -z "$CAND" ]; then
+            for try in "app.py" "video_cutter_gui.py" "src/app.py" "src/video_cutter_gui.py"; do
+              if [ -f "$try" ]; then CAND="$try"; break; fi
+            done
+          fi
+
+          # 4) Fallback cuối: lấy file .py đầu tiên
+          if [ -z "$CAND" ]; then
+            CAND="${PYFILES[0]}"
+          fi
+
+          if [ -z "$CAND" ] || [ ! -f "$CAND" ]; then
+            echo "::error::Không phát hiện được ENTRY_SCRIPT. Hãy tạo file ENTRY_SCRIPT.txt chứa đường dẫn tương đối tới file .py khởi chạy (ví dụ: app.py)."
             exit 1
           fi
-          echo "ENTRY_SCRIPT=$FOUND" >> $GITHUB_ENV
-          echo "Sẽ build với ENTRY_SCRIPT=$FOUND"
+
+          echo "ENTRY_SCRIPT=$CAND" >> $GITHUB_ENV
+          echo ">> ENTRY_SCRIPT được chọn: $CAND"
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-      - name: Setup Node (to fetch static ffmpeg/ffprobe)
+      - name: Setup Node (để tải ffmpeg/ffprobe static)
         uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -50,7 +88,6 @@ jobs:
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          # Cài các gói tối thiểu; nếu repo có requirements.txt thì cài thêm
           pip install pyinstaller PySide6 || true
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
