@@ -1,0 +1,156 @@
+name: Build macOS (.app + .dmg) with auto FFmpeg (portable entry detect)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  mac-arm64:
+    name: macOS Apple Silicon (arm64)
+    runs-on: macos-14
+    env:
+      APP_NAME: "VideoCutter"   # đặt tên app ở đây
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show repo tree (debug)
+        shell: bash
+        run: |
+          echo "== ROOT =="
+          ls -la
+          echo "== PY FILES FOUND (<=6 levels) =="
+          find . -type f -name "*.py" -maxdepth 6 -print | sort
+
+      # ⬇️ Không dùng bash mapfile nữa — dùng Python để tìm ENTRY_SCRIPT
+      - name: Detect ENTRY_SCRIPT (Python - portable)
+        id: detect
+        shell: bash
+        run: |
+          ENTRY=$(python - <<'PY'
+import os, re, sys
+# 1) Cho phép override bằng ENTRY_SCRIPT.txt (ghi "app.py" hoặc "subdir/app.py")
+if os.path.isfile('ENTRY_SCRIPT.txt'):
+    p = open('ENTRY_SCRIPT.txt','r',encoding='utf-8').read().strip()
+    if os.path.isfile(p):
+        print(p); sys.exit(0)
+    else:
+        print(f'__ERR__ ENTRY_SCRIPT.txt -> missing: {p}')
+        sys.exit(2)
+
+# 2) Quét tất cả .py (tối đa 6 cấp)
+cands = []
+for root, dirs, files in os.walk('.', topdown=True):
+    # giới hạn độ sâu tương đối
+    depth = root.count(os.sep) - 1  # '.' = -1
+    if depth >= 6:
+        continue
+    for f in files:
+        if f.endswith('.py'):
+            cands.append(os.path.join(root, f))
+
+if not cands:
+    print('__ERR__ no .py files found')
+    sys.exit(1)
+
+# 3) Heuristic: file có PySide6/QApplication và __main__
+pref = None
+for p in cands:
+    try:
+        t = open(p,'r',encoding='utf-8',errors='ignore').read()
+    except Exception:
+        continue
+    if re.search(r'(from\\s+PySide6|import\\s+PySide6|QApplication)', t, re.I) and '__main__' in t:
+        pref = p
+        break
+
+# 4) Fallback theo tên thường gặp
+if pref is None:
+    for tryname in ['app.py','video_cutter_gui.py','src/app.py','src/video_cutter_gui.py']:
+        if os.path.isfile(tryname):
+            pref = tryname
+            break
+
+# 5) Fallback cuối: lấy file .py đầu tiên
+if pref is None:
+    pref = cands[0]
+
+if not pref or not os.path.isfile(pref):
+    print('__ERR__ no entry script')
+    sys.exit(1)
+
+print(pref)
+PY
+)
+          echo "ENTRY raw: $ENTRY"
+          if [[ "$ENTRY" == __ERR__* ]]; then
+            echo "::error::$ENTRY"
+            exit 1
+          fi
+          echo "ENTRY_SCRIPT=$ENTRY" >> "$GITHUB_ENV"
+          echo "Using ENTRY_SCRIPT=$ENTRY"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Setup Node (để tải ffmpeg/ffprobe static)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python deps
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller PySide6 || true
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Fetch FFmpeg + FFprobe static (darwin/arm64)
+        shell: bash
+        run: |
+          npm i ffmpeg-static@latest ffprobe-static@latest
+          FFMPEG_PATH=$(node -p "require('ffmpeg-static') || ''")
+          FFPROBE_PATH=$(node -p "require('ffprobe-static').path || ''")
+          echo "FFMPEG=$FFMPEG_PATH"
+          echo "FFPROBE=$FFPROBE_PATH"
+          if [ ! -f "$FFMPEG_PATH" ] || [ ! -f "$FFPROBE_PATH" ]; then
+            echo "::error::Không tìm thấy nhị phân ffmpeg/ffprobe"; exit 1
+          fi
+          chmod +x "$FFMPEG_PATH" "$FFPROBE_PATH"
+          echo "FFMPEG_PATH=$FFMPEG_PATH"   >> "$GITHUB_ENV"
+          echo "FFPROBE_PATH=$FFPROBE_PATH" >> "$GITHUB_ENV"
+
+      - name: Build .app (embed FFmpeg/FFprobe)
+        shell: bash
+        run: |
+          pyinstaller --noconfirm --clean --windowed \
+            --name "$APP_NAME" \
+            --add-binary "$FFMPEG_PATH:." \
+            --add-binary "$FFPROBE_PATH:." \
+            "$ENTRY_SCRIPT"
+          ls -la dist
+
+      - name: Create .dmg
+        shell: bash
+        run: |
+          DMG_NAME="${APP_NAME}-arm64.dmg"
+          mkdir -p dist_dmg
+          cp -R "dist/${APP_NAME}.app" dist_dmg/
+          hdiutil create "$DMG_NAME" -volname "$APP_NAME" -srcfolder "dist_dmg" -ov -format UDZO
+          rm -rf dist_dmg
+          ls -la
+
+      - name: Upload .app
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-mac-app-arm64
+          path: dist/${{ env.APP_NAME }}.app
+
+      - name: Upload .dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-mac-dmg-arm64
+          path: ${{ env.APP_NAME }}-arm64.dmg
