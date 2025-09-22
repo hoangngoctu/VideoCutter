@@ -1,0 +1,70 @@
+name: Build macOS (.app + .dmg) with auto FFmpeg
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  mac-arm64:
+    runs-on: macos-14   # Apple Silicon runner (arm64)
+    env:
+      APP_NAME: "VideoCutter"
+      ENTRY_SCRIPT: "video_cutter_gui.py"   # <--- ĐỔI nếu file chính của bạn tên khác (vd: app.py)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Setup Node (để tải FFmpeg/FFprobe static qua npm)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller PySide6
+
+      - name: Lấy FFmpeg + FFprobe static (arm64) qua npm
+        run: |
+          npm i ffmpeg-ffprobe-static@latest
+          FFMPEG_PATH=$(node -p "require('ffmpeg-ffprobe-static').ffmpeg")
+          FFPROBE_PATH=$(node -p "require('ffmpeg-ffprobe-static').ffprobe")
+          echo "FFMPEG_PATH=$FFMPEG_PATH"   >> $GITHUB_ENV
+          echo "FFPROBE_PATH=$FFPROBE_PATH" >> $GITHUB_ENV
+          chmod +x "$FFMPEG_PATH" "$FFPROBE_PATH"
+
+      - name: Build .app bằng PyInstaller (embed FFmpeg/FFprobe)
+        run: |
+          pyinstaller --noconfirm --clean --windowed \
+            --name "$APP_NAME" \
+            --add-binary "$FFMPEG_PATH:." \
+            --add-binary "$FFPROBE_PATH:." \
+            "$ENTRY_SCRIPT"
+          ls -la dist
+
+      - name: Đóng gói .dmg
+        run: |
+          DMG_NAME="${APP_NAME}-arm64.dmg"
+          mkdir -p dist_dmg
+          cp -R "dist/${APP_NAME}.app" dist_dmg/
+          hdiutil create "$DMG_NAME" -volname "$APP_NAME" -srcfolder "dist_dmg" -ov -format UDZO
+          rm -rf dist_dmg
+          ls -la
+
+      - name: Upload .app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-mac-app
+          path: dist/${{ env.APP_NAME }}.app
+
+      - name: Upload .dmg artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-mac-dmg
+          path: ${{ env.APP_NAME }}-arm64.dmg
