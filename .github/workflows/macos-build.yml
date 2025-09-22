@@ -5,14 +5,16 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+# ===== Build cho cả 2 kiến trúc: arm64 (macOS 14) và x86_64 (macOS 13) =====
 jobs:
   mac-arm64:
-    runs-on: macos-14   # Apple Silicon runner (arm64)
+    name: macOS Apple Silicon (arm64)
+    runs-on: macos-14
     env:
       APP_NAME: "VideoCutter"
-      ENTRY_SCRIPT: "video_cutter_gui.py"   # <--- ĐỔI nếu file chính của bạn tên khác (vd: app.py)
+      ENTRY_SCRIPT: "video_cutter_gui.py"   # <-- đổi nếu file chính của bạn tên khác
     steps:
-      - name: Checkout
+      - name: Checkout source
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -20,7 +22,7 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Setup Node (để tải FFmpeg/FFprobe static qua npm)
+      - name: Setup Node (để tải ffmpeg/ffprobe static)
         uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -30,16 +32,26 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller PySide6
 
-      - name: Lấy FFmpeg + FFprobe static (arm64) qua npm
+      - name: Tải FFmpeg + FFprobe static (darwin/arm64)
         run: |
-          npm i ffmpeg-ffprobe-static@latest
-          FFMPEG_PATH=$(node -p "require('ffmpeg-ffprobe-static').ffmpeg")
-          FFPROBE_PATH=$(node -p "require('ffmpeg-ffprobe-static').ffprobe")
+          npm i ffmpeg-static@latest ffprobe-static@latest
+          # Lấy path nhị phân từ 2 package
+          FFMPEG_PATH=$(node -p "require('ffmpeg-static') || ''")
+          FFPROBE_PATH=$(node -p "require('ffprobe-static').path || ''")
+
+          echo "FFMPEG_PATH=$FFMPEG_PATH"
+          echo "FFPROBE_PATH=$FFPROBE_PATH"
+
+          # Kiểm tra tồn tại
+          if [ ! -f "$FFMPEG_PATH" ] || [ ! -f "$FFPROBE_PATH" ]; then
+            echo '❌ Không tìm thấy nhị phân ffmpeg/ffprobe'; exit 1
+          fi
+
+          chmod +x "$FFMPEG_PATH" "$FFPROBE_PATH"
           echo "FFMPEG_PATH=$FFMPEG_PATH"   >> $GITHUB_ENV
           echo "FFPROBE_PATH=$FFPROBE_PATH" >> $GITHUB_ENV
-          chmod +x "$FFMPEG_PATH" "$FFPROBE_PATH"
 
-      - name: Build .app bằng PyInstaller (embed FFmpeg/FFprobe)
+      - name: Build .app (embed FFmpeg/FFprobe)
         run: |
           pyinstaller --noconfirm --clean --windowed \
             --name "$APP_NAME" \
@@ -48,7 +60,7 @@ jobs:
             "$ENTRY_SCRIPT"
           ls -la dist
 
-      - name: Đóng gói .dmg
+      - name: Tạo file .dmg
         run: |
           DMG_NAME="${APP_NAME}-arm64.dmg"
           mkdir -p dist_dmg
@@ -57,14 +69,86 @@ jobs:
           rm -rf dist_dmg
           ls -la
 
-      - name: Upload .app artifact
+      - name: Upload .app
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.APP_NAME }}-mac-app
+          name: ${{ env.APP_NAME }}-mac-app-arm64
           path: dist/${{ env.APP_NAME }}.app
 
-      - name: Upload .dmg artifact
+      - name: Upload .dmg
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.APP_NAME }}-mac-dmg
+          name: ${{ env.APP_NAME }}-mac-dmg-arm64
           path: ${{ env.APP_NAME }}-arm64.dmg
+
+  mac-x86_64:
+    name: macOS Intel (x86_64)
+    runs-on: macos-13
+    env:
+      APP_NAME: "VideoCutter"
+      ENTRY_SCRIPT: "video_cutter_gui.py"   # <-- đổi nếu file chính của bạn tên khác
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Setup Node (để tải ffmpeg/ffprobe static)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller PySide6
+
+      - name: Tải FFmpeg + FFprobe static (darwin/x64)
+        run: |
+          npm i ffmpeg-static@latest ffprobe-static@latest
+          FFMPEG_PATH=$(node -p "require('ffmpeg-static') || ''")
+          FFPROBE_PATH=$(node -p "require('ffprobe-static').path || ''")
+
+          echo "FFMPEG_PATH=$FFMPEG_PATH"
+          echo "FFPROBE_PATH=$FFPROBE_PATH"
+
+          if [ ! -f "$FFMPEG_PATH" ] || [ ! -f "$FFPROBE_PATH" ]; then
+            echo '❌ Không tìm thấy nhị phân ffmpeg/ffprobe'; exit 1
+          fi
+
+          chmod +x "$FFMPEG_PATH" "$FFPROBE_PATH"
+          echo "FFMPEG_PATH=$FFMPEG_PATH"   >> $GITHUB_ENV
+          echo "FFPROBE_PATH=$FFPROBE_PATH" >> $GITHUB_ENV
+
+      - name: Build .app (embed FFmpeg/FFprobe)
+        run: |
+          pyinstaller --noconfirm --clean --windowed \
+            --name "$APP_NAME" \
+            --add-binary "$FFMPEG_PATH:." \
+            --add-binary "$FFPROBE_PATH:." \
+            "$ENTRY_SCRIPT"
+          ls -la dist
+
+      - name: Tạo file .dmg
+        run: |
+          DMG_NAME="${APP_NAME}-x86_64.dmg"
+          mkdir -p dist_dmg
+          cp -R "dist/${APP_NAME}.app" dist_dmg/
+          hdiutil create "$DMG_NAME" -volname "$APP_NAME" -srcfolder "dist_dmg" -ov -format UDZO
+          rm -rf dist_dmg
+          ls -la
+
+      - name: Upload .app
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-mac-app-x86_64
+          path: dist/${{ env.APP_NAME }}.app
+
+      - name: Upload .dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-mac-dmg-x86_64
+          path: ${{ env.APP_NAME }}-x86_64.dmg
